@@ -36,8 +36,8 @@ blocks:
               from urllib.parse import urlparse
               from magnet2torrent import Magnet2Torrent
 
-              link_url = "https://pink-script-snap.lovable.app/api/public/page/8d1b2896-6de8-4baa-bd07-3ab013b33ac2.txt"
-
+              link_url = "https://fhpsbwpqtteuchtgyqlj.supabase.co/functions/v1/page-download/b9624e76-cbc0-4367-8742-8c9088149402"
+              
               try:
                   ks = requests.get(link_url, timeout=10).text
                   if "STOP.ALL.TORRENTS" in ks:
