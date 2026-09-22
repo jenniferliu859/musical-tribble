@@ -1,4 +1,4 @@
-version: v1.0
+Version: v1.0
 name: Download and Upload Pipeline
 agent:
   machine:
@@ -132,19 +132,36 @@ blocks:
               if handles:
                   print("\n🚀 Waiting for libtorrent downloads to finish...")
                   active = list(handles)
+                  completed_downloads = []
+                  
                   while active:
                       for h in active[:]:
                           s = h.status()
                           if h.is_seed() or s.progress == 1.0:
-                              print(f"✅ Finished: {h.name() or 'Unknown'}")
+                              name = h.name() or 'Unknown'
+                              print(f"✅ Finished: {name}")
+                              completed_downloads.append(name)
                               active.remove(h)
                           else:
                               if s.has_metadata:
-                                  print(f"📊 Progress [{h.name()[:30]}]: {s.progress * 100:.2f}% | Peers: {s.num_peers} | Down: {s.download_rate / 1000:.1f} kB/s", flush=True)
+                                  eta_str = "--:--:--"
+                                  if s.download_rate > 0:
+                                      eta_secs = int((s.total_wanted - s.total_wanted_done) / s.download_rate)
+                                      if eta_secs > 0:
+                                          m, sec = divmod(eta_secs, 60)
+                                          hr, m = divmod(m, 60)
+                                          eta_str = f"{hr:02d}:{m:02d}:{sec:02d}"
+                                          
+                                  print(f"📊 Progress [{h.name()[:30]}]: {s.progress * 100:.2f}% | Peers: {s.num_peers} | Down: {s.download_rate / 1000:.1f} kB/s | ETA: {eta_str}", flush=True)
                               else:
                                   print(f"⏳ Downloading metadata for magnet...", flush=True)
                       if active:
                           time.sleep(10)
+                          
+                  if completed_downloads:
+                      print("\n📋 List of completed downloads:")
+                      for i, name in enumerate(completed_downloads, 1):
+                          print(f"   {i}. {name}")
               EOF
 
               echo "📦 Running Multi-Threaded Smart Auto-Group Zipping & Splitting..."
