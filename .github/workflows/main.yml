@@ -9,7 +9,7 @@ on:
 jobs:
   download-group-upload:
     runs-on: ubuntu-latest
-  
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -51,7 +51,9 @@ jobs:
                               try:
                                   m2t = Magnet2Torrent(link)
                                   filename, torrent_data = await asyncio.wait_for(m2t.retrieve_torrent(), timeout=30)
-                                  torrent_path = os.path.join("torrents", f"{filename}.torrent")
+                                  if not filename.endswith('.torrent'):
+                                      filename = f"{filename}.torrent"
+                                  torrent_path = os.path.join("torrents", filename)
                                   with open(torrent_path, "wb") as f:
                                       f.write(torrent_data)
                                   print(f"✅ Saved torrent: {torrent_path}")
@@ -214,7 +216,7 @@ jobs:
                                   await proc.wait()
                                   break
 
-                          except asyncioTimeoutError:
+                          except (asyncio.TimeoutError, TimeoutError):
                               elapsed = time.time() - start_time
                               if not download_started and elapsed > stuck_timeout:
                                   print(f"⏱️ Idle timeout (0 bytes for {stuck_timeout}s). Retrying attempt {attempt}...", flush=True)
@@ -400,7 +402,6 @@ jobs:
                           current_part_size = 0
                           
                           for fp, sz in all_files:
-                              # If adding this file exceeds 17GB and the current part is not empty, start a new part
                               if current_part_size + sz > MAX_BYTES and current_part_size > 0:
                                   part_num += 1
                                   current_part_size = 0
@@ -417,7 +418,6 @@ jobs:
                               current_part_size += sz
                               print(f"  └─ Moved to {part_dir_name}: {os.path.basename(fp)}", flush=True)
                           
-                          # Remove original empty parent folder after splitting
                           shutil.rmtree(entry_path, ignore_errors=True)
                           print(f"✅ Finished splitting '{entry}' into {part_num} parts.", flush=True)
           EOF
