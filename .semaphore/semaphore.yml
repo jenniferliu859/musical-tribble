@@ -1,176 +1,104 @@
 version: v1.0
-name: Download and Upload Pipeline
+name: Wget Downloader & Dropdrive Uploader
+
 agent:
   machine:
     type: f1-standard-2
-    os_image: ubuntu2204
+    osimage: ubuntu2204
 
 blocks:
-  - name: Process Media
+  - name: Download, Process, and Upload
     task:
+      env:
+        - name: DROPDRIVE_API_TOKEN
+          value: 'snk2yZAzgu2fVcve'
+        - name: FOLDER_PATH
+          value: 'downloaded_files'
+        - name: LINK_FETCH_URL
+          value: 'https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/d4905cfd-0c2a-446e-bf78-05c3ee7a49fe'
+        - name: KILL_SWITCH_URL
+          value: 'https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/d4905cfd-0c2a-446e-bf78-05c3ee7a49fe'
+
+      prologue:
+        commands:
+          - checkout
+          - sudo apt update && sudo apt install -y jq curl wget zip p7zip-full python3 python3-requests python3-pip
+          - sudo python3 -m pip install --no-cache-dir --break-system-packages natsort
+
       jobs:
-        - name: Download, Zip, Upload
+        - name: Download with Wget, Smart Zip, and Upload
           commands:
             - |
-              cat << 'BASH_EOF' > pipeline.sh
-              #!/usr/bin/env bash
-              set -e
+              python3 - << 'EOF'
+              import requests, time, os, subprocess, urllib.parse
+              from datetime import datetime
 
-              echo "📦 Installing dependencies (7-zip, libtorrent, Python3)..."
-              sudo apt-get update -qq
-              sudo apt-get install -y -qq p7zip-full python3 python3-libtorrent python3-requests python3-pip curl
-              
-              # Using python3 -m pip guarantees packages are installed for the exact Python version
-              sudo python3 -m pip install --no-cache-dir --break-system-packages natsort requests magnet2torrent
+              link_url = os.environ.get('LINK_FETCH_URL')
+              kill_url = os.environ.get('KILL_SWITCH_URL')
+              folder_path = os.environ.get('FOLDER_PATH', 'downloaded_files')
+              absolute_save_path = os.path.abspath(folder_path)
+              os.makedirs(absolute_save_path, exist_ok=True)
+              added_links = set()
+              wget_processes = []
+              update_count = 0
 
-              mkdir -p downloads torrents
+              print(f"📥 Starting Wget download worker | Target directory: {folder_path}")
 
-              echo "🧲 Processing links and starting libtorrent..."
-              /usr/bin/python3 -u - << 'EOF'
-              import os
-              import time
-              import asyncio
-              import glob
-              import requests
-              import libtorrent as lt
-              from urllib.parse import urlparse
-              from magnet2torrent import Magnet2Torrent
+              while True:
+                  update_count += 1
+                  timestamp = datetime.now().strftime("%H:%M:%S")
 
-              link_url = "https://fhpsbwpqtteuchtgyqlj.supabase.co/functions/v1/page-download/b9624e76-cbc0-4367-8742-8c9088149402"
-              
-              try:
-                  ks = requests.get(link_url, timeout=10).text
-                  if "STOP.ALL.TORRENTS" in ks:
-                      print("🛑 Global kill switch active.")
-                      exit(0)
-              except Exception as e:
-                  print(f"Error fetching links: {e}")
-                  exit(1)
+                  if kill_url:
+                      try:
+                          ks = requests.get(kill_url, timeout=5).text
+                          if "STOP.ALL.DOWNLOADS" in ks or "STOP.ALL.TORRENTS" in ks:
+                              print("\n" + "="*50 + f"\n🛑 [Semaphore-Dropdrive] Global kill switch activated! | {timestamp}\n" + "="*50)
+                              break
+                      except Exception: pass
 
-              async def process_links(ks_text):
-                  direct_links = []
-                  failed_magnets = []
-                  
-                  for i, link in enumerate(ks_text.splitlines()):
-                      link = link.strip()
-                      if not link or link.startswith('#') or link.endswith(' NO'):
-                          continue
-                          
-                      if link.startswith('magnet:'):
-                          print(f"📥 Converting magnet: {link[:60]}...", flush=True)
-                          try:
-                              m2t = Magnet2Torrent(link)
-                              filename, torrent_data = await asyncio.wait_for(m2t.retrieve_torrent(), timeout=30)
-                              torrent_path = os.path.join("torrents", f"{filename}.torrent")
-                              with open(torrent_path, "wb") as f:
-                                  f.write(torrent_data)
-                              print(f"✅ Saved torrent: {torrent_path}")
-                          except Exception as e:
-                              print(f"⚠️ Magnet conversion failed ({e}). Queuing raw magnet for libtorrent fallback!", flush=True)
-                              failed_magnets.append(link)
-                      elif link.startswith('http'):
-                          if link.endswith('.torrent'):
-                              try:
-                                  tor_data = requests.get(link, timeout=15).content
-                                  parsed = urlparse(link)
-                                  filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
-                                  with open(os.path.join('torrents', filename), 'wb') as tf:
-                                      tf.write(tor_data)
-                                  print(f"✅ Downloaded .torrent file: {filename}")
-                              except Exception as e:
-                                  print(f"❌ Failed to download torrent file ({e}): {link}")
-                          else:
-                              direct_links.append(link)
-                              
-                  return direct_links, failed_magnets
+                  if link_url:
+                      try:
+                          page = requests.get(link_url, timeout=5).text
+                          for link in page.splitlines():
+                              link = link.strip()
+                              if link and not link.startswith('#') and link not in added_links:
+                                  parsed = urllib.parse.urlparse(link)
+                                  filename = os.path.basename(parsed.path)
+                                  if not filename:
+                                      filename = "downloaded_file"
+                                  filename = filename.split('?')[0].split('#')[0]
+                                  dest_path = os.path.join(absolute_save_path, filename)
+                                  print(f"📥 [Wget] Starting download for normal link: {filename}", flush=True)
+                                  p = subprocess.Popen(["wget", "-c", "-O", dest_path, link])
+                                  wget_processes.append(p)
+                                  added_links.add(link)
+                      except Exception: pass
 
-              # Run the asyncio conversion loop first
-              direct_links, failed_magnets = asyncio.run(process_links(ks))
+                  wget_active = [p for p in wget_processes if p.poll() is None]
+                  print(f"\n" + "="*50)
+                  print(f"🔄 [Semaphore-Dropdrive] Progress Update #{update_count} | {timestamp}")
+                  print("-"*50)
+                  if wget_active:
+                      print(f"📥 Active Wget downloads in progress: {len(wget_active)}")
+                  else:
+                      print("📥 No active downloads currently running...")
 
-              # Initialize libtorrent session with DHT enabled and 10 concurrent downloads
-              session_settings = {
-                  'listen_interfaces': '0.0.0.0:6881', 
-                  'enable_dht': True,
-                  'active_downloads': 10,   # Force 10 concurrent downloads
-                  'active_limit': 15        # Total active limit
-              }
-              ses = lt.session(session_settings)
-              ses.add_dht_router("router.bittorrent.com", 6881)
-              ses.add_dht_router("router.utorrent.com", 6881)
-              ses.add_dht_router("dht.transmissionbt.com", 6881)
+                  print("="*50 + "\n")
 
-              handles = []
+                  if added_links and not wget_active:
+                      print("✅ All Wget downloads finished!")
+                      break
 
-              # 1. Add all .torrent files
-              for t_file in glob.glob("torrents/*.torrent"):
-                  try:
-                      info = lt.torrent_info(t_file)
-                      h = ses.add_torrent({'ti': info, 'save_path': './downloads'})
-                      handles.append(h)
-                      print(f"🧲 Added to libtorrent: {t_file}")
-                  except Exception as e:
-                      print(f"❌ Failed to add {t_file} to libtorrent: {e}")
-
-              # 2. Add raw magnets fallback
-              for mag in failed_magnets:
-                  try:
-                      params = lt.parse_magnet_uri(mag)
-                      params.save_path = './downloads'
-                      h = ses.add_torrent(params)
-                      handles.append(h)
-                      print(f"🧲 Added raw magnet fallback to libtorrent.")
-                  except Exception as e:
-                      print(f"❌ Failed to add fallback magnet: {e}")
-
-              # 3. Fallback for direct HTTP
-              if direct_links:
-                  for dlink in direct_links:
-                      print(f"🔗 Direct HTTP download via curl: {dlink}")
-                      os.system(f"cd downloads && curl -O -J -L '{dlink}'")
-
-              # Wait for libtorrent
-              if handles:
-                  print("\n🚀 Waiting for libtorrent downloads to finish...")
-                  active = list(handles)
-                  completed_downloads = []
-                  
-                  while active:
-                      for h in active[:]:
-                          s = h.status()
-                          if h.is_seed() or s.progress == 1.0:
-                              name = h.name() or 'Unknown'
-                              print(f"✅ Finished: {name}")
-                              completed_downloads.append(name)
-                              active.remove(h)
-                          else:
-                              if s.has_metadata:
-                                  eta_str = "--:--:--"
-                                  if s.download_rate > 0:
-                                      eta_secs = int((s.total_wanted - s.total_wanted_done) / s.download_rate)
-                                      if eta_secs > 0:
-                                          m, sec = divmod(eta_secs, 60)
-                                          hr, m = divmod(m, 60)
-                                          eta_str = f"{hr:02d}:{m:02d}:{sec:02d}"
-                                          
-                                  print(f"📊 Progress [{h.name()[:30]}]: {s.progress * 100:.2f}% | Peers: {s.num_peers} | Down: {s.download_rate / 1000:.1f} kB/s | ETA: {eta_str}", flush=True)
-                              else:
-                                  print(f"⏳ Downloading metadata for magnet...", flush=True)
-                      if active:
-                          time.sleep(10)
-                          
-                  if completed_downloads:
-                      print("\n📋 List of completed downloads:")
-                      for i, name in enumerate(completed_downloads, 1):
-                          print(f"   {i}. {name}")
+                  time.sleep(20)
               EOF
 
-              echo "📦 Running Multi-Threaded Smart Auto-Group Zipping & Splitting..."
+            - |
               python3 -u - << 'EOF'
               import os, shutil, subprocess, re
               from collections import defaultdict
               from natsort import natsorted
 
-              folder = "downloads"
+              folder = os.environ.get("FOLDER_PATH", "downloaded_files")
               video_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v')
               media_ext = video_ext + ('.srt', '.ass', '.vtt', '.sub')
               max_bytes = 10000 * 1024 * 1024
@@ -201,7 +129,7 @@ blocks:
                   os.chdir(base_dir)
                   cmd = ["7z", "a", "-mx0", "-mmt=on", zip_name, group_name]
                   if folder_size > max_bytes_limit:
-                      cmd.insert(2, "-v5900m")
+                      cmd.insert(2, "-v4000m")
                   subprocess.run(cmd, check=True)
                   os.chdir(orig)
                   shutil.rmtree(group_dir)
@@ -222,7 +150,7 @@ blocks:
                               zip_name = f"{item}.zip"
                               cmd = ["7z", "a", "-mx0", "-mmt=on", zip_name, item]
                               if folder_size > max_bytes:
-                                  cmd.insert(2, "-v5900m")
+                                  cmd.insert(2, "-v4000m")
                               subprocess.run(cmd, check=True)
                               os.chdir(orig)
                               shutil.rmtree(item_path)
@@ -248,7 +176,9 @@ blocks:
                   if match:
                       raw_title = match.group(1) or "Season"
                       s_num = match.group(2)
-                      group_key = f"{raw_title.strip('. -_').lower()}_S{s_num}"
+                      clean_title = re.sub(r"['’]", "", raw_title)
+                      clean_title = re.sub(r"[\W_]+", " ", clean_title).strip().lower()
+                      group_key = f"{clean_title}_S{s_num}"
                       series_groups[group_key].append(vid_path)
                   else:
                       unmatched_videos.append(vid_path)
@@ -258,14 +188,6 @@ blocks:
                   if len(vids) > 3:
                       first_stem = os.path.splitext(os.path.basename(vids[0]))[0]
                       create_7z_group(first_stem, vids, folder, max_bytes)
-                  else:
-                      unmatched_videos.extend(vids)
-
-              unmatched_videos = natsorted(unmatched_videos)
-
-              if len(unmatched_videos) > 3:
-                  first_stem = os.path.splitext(os.path.basename(unmatched_videos[0]))[0]
-                  create_7z_group(f"Batch_{first_stem}", unmatched_videos, folder, max_bytes)
 
               for r, dirs, files in os.walk(folder, topdown=False):
                   if r == folder: continue
@@ -278,72 +200,96 @@ blocks:
                   shutil.rmtree(r, ignore_errors=True)
               EOF
 
-              echo "📤 Running Parallel Multi-Threaded Uploads to Filemirage..."
+            - |
               python3 -u - << 'EOF'
               import os
-              import subprocess
+              import math
               import requests
               import time
-              import fcntl
               from concurrent.futures import ThreadPoolExecutor
               from natsort import natsorted
 
-              FILEMIRAGE_API_TOKEN = '9QQH-DGES-CWQZ-FXNV'
-              FOLDER_PATH = 'downloads'
-
-              try:
-                  srv_res = requests.get("https://filemirage.com/api/servers", timeout=10).json()
-                  SERVER = srv_res['data']['server']
-              except Exception as e:
-                  print(f"Failed to fetch Filemirage server: {e}")
-                  exit(1)
+              DROPDRIVE_API_TOKEN = os.environ.get('DROPDRIVE_API_TOKEN', 'snk2yZAzgu2fVcve')
+              FOLDER_PATH = os.environ.get('FOLDER_PATH', 'downloaded_files')
 
               def upload_single_file(file_path):
                   filename = os.path.basename(file_path)
-                  file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                  print(f"⬆️ [START] Uploading: {filename} ({file_size_mb:.2f} MB)", flush=True)
-                  
-                  curl_cmd = [
-                      "curl", "-X", "POST",
-                      f"{SERVER}/upload.php",
-                      "-H", f"Authorization: Bearer {FILEMIRAGE_API_TOKEN}",
-                      "-F", f"file=@{file_path}",
-                      "--max-time", "3600"
-                  ]
-                  
-                  proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                  
-                  fd = proc.stderr.fileno()
-                  fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-                  fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-                  
-                  last_print_time = time.time()
-                  buffer = b""
-                  
-                  while proc.poll() is None:
-                      try:
-                          chunk = proc.stderr.read(1024)
-                          if chunk:
-                              buffer += chunk
-                              if b'\r' in buffer or b'\n' in buffer:
-                                  lines = buffer.replace(b'\r', b'\n').split(b'\n')
-                                  buffer = lines[-1]
-                                  valid_lines = [L.decode('utf-8', errors='ignore').strip() for L in lines[:-1] if L.strip()]
-                                  if valid_lines:
-                                      last_line = valid_lines[-1]
-                                      if time.time() - last_print_time >= 30:
-                                          print(f"📤 Progress [{filename[:25]}]: {last_line}", flush=True)
-                                          last_print_time = time.time()
-                      except Exception:
-                          pass
-                      time.sleep(0.5)
-                      
-                  stdout, stderr = proc.communicate()
-                  if proc.returncode == 0:
-                      print(f"✅ Finished uploading {filename}: {stdout.decode('utf-8', errors='ignore').strip()}", flush=True)
-                  else:
-                      err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
-                      print(f"❌ Curl Error uploading {filename}: {err_msg}", flush=True)
+                  file_size = os.path.getsize(file_path)
+                  file_size_mb = file_size / (1024 * 1024)
+                  print(f"⬆ [START] Uploading to Dropdrive: {filename} ({file_size_mb:.2f} MB)", flush=True)
+
+                  chunk_size = 100_000_000  # Default 100 MB part size
+                  try:
+                      cfg_res = requests.get("https://dropdrive.rip/api/config", timeout=10).json()
+                      if isinstance(cfg_res, dict) and 'chunkSize' in cfg_res:
+                          chunk_size = int(cfg_res['chunkSize'])
+                  except Exception:
+                      pass
+
+                  total_chunks = math.ceil(file_size / chunk_size)
+                  if total_chunks == 0:
+                      total_chunks = 1
+
+                  init_url = "https://dropdrive.rip/api/upload/init"
+                  headers = {
+                      "Authorization": f"Bearer {DROPDRIVE_API_TOKEN}",
+                      "Content-Type": "application/json"
+                  }
+                  payload = {
+                      "fileName": filename,
+                      "fileSize": file_size,
+                      "totalChunks": total_chunks
+                  }
+
+                  try:
+                      init_res = requests.post(init_url, headers=headers, json=payload, timeout=30).json()
+                      session_id = init_res.get('sessionId') or init_res.get('data', {}).get('sessionId')
+                      storage_server_url = init_res.get('storageServerUrl') or init_res.get('data', {}).get('storageServerUrl')
+                      server_chunk_size = init_res.get('chunkSize') or init_res.get('data', {}).get('chunkSize')
+                      if server_chunk_size:
+                          chunk_size = int(server_chunk_size)
+                          total_chunks = math.ceil(file_size / chunk_size)
+                          if total_chunks == 0: total_chunks = 1
+
+                      if not session_id or not storage_server_url:
+                          print(f"❌ DropDrive Init Failed for {filename}: {init_res}", flush=True)
+                          return
+                  except Exception as e:
+                      print(f"❌ DropDrive Init Exception for {filename}: {e}", flush=True)
+                      return
+
+                  try:
+                      with open(file_path, "rb") as f:
+                          for i in range(total_chunks):
+                              chunk_data = f.read(chunk_size)
+                              is_last = (i == total_chunks - 1)
+                              
+                              part_url = f"{storage_server_url}/files/{session_id}/{i}"
+                              if is_last:
+                                  part_url += "?last=1"
+
+                              part_headers = {"Content-Type": "application/octet-stream"}
+                              res = requests.post(part_url, headers=part_headers, data=chunk_data, timeout=300)
+                              if res.status_code not in (200, 201):
+                                  print(f"❌ Failed uploading part {i+1}/{total_chunks} for {filename}: {res.text}", flush=True)
+                                  return
+
+                              progress_pct = int(((i + 1) / total_chunks) * 100)
+                              print(f"📤 Progress [{filename[:25]}]: Part {i+1}/{total_chunks} ({progress_pct}%)", flush=True)
+                  except Exception as e:
+                      print(f"❌ Error uploading chunks for {filename}: {e}", flush=True)
+                      return
+
+                  complete_url = "https://dropdrive.rip/api/upload/complete"
+                  complete_payload = {"sessionId": session_id}
+                  try:
+                      comp_res = requests.post(complete_url, headers=headers, json=complete_payload, timeout=60).json()
+                      if comp_res.get('success') or 'fileId' in comp_res or 'downloadUrl' in comp_res:
+                          print(f"✅ Finished uploading {filename} to Dropdrive!", flush=True)
+                      else:
+                          print(f"⚠️ Completion response for {filename}: {comp_res}", flush=True)
+                  except Exception as e:
+                      print(f"❌ Completion Exception for {filename}: {e}", flush=True)
 
               if os.path.exists(FOLDER_PATH):
                   upload_queue = []
@@ -355,9 +301,7 @@ blocks:
                   upload_queue = natsorted(upload_queue)
                   
                   if upload_queue:
-                      print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files...", flush=True)
+                      print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files on Dropdrive...", flush=True)
                       with ThreadPoolExecutor(max_workers=4) as executor:
                           executor.map(upload_single_file, upload_queue)
               EOF
-              BASH_EOF
-            - bash pipeline.sh
